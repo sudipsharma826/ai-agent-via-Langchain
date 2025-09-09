@@ -1,16 +1,20 @@
 import { AIMessage, BaseMessage, HumanMessage } from '@langchain/core/messages';
 import { ChatGroq } from '@langchain/groq';
-import { StateGraph,MessagesAnnotation} from '@langchain/langgraph';
+import { StateGraph, MemorySaver, MessagesAnnotation } from '@langchain/langgraph';
 import { ToolNode } from "@langchain/langgraph/prebuilt";
 import { TavilySearch } from "@langchain/tavily";
+import { Annotation } from '@langchain/langgraph';
 import readline from 'node:readline/promises';
 import 'dotenv/config';
 
 interface MessageState {
-    messages: BaseMessage[];
+  messages: (HumanMessage | AIMessage)[];
 }
 
-//Create the tool node
+// Add Memory
+const checkpointer = new MemorySaver();
+
+// Create the tool node
 const tool = new TavilySearch({
   maxResults: 3,
   topic: "general",
@@ -23,55 +27,55 @@ const tool = new TavilySearch({
   // includeDomains: [],
   // excludeDomains: [],
 });
-const tools= [tool];//can add multiple tools
+const tools = [tool];
 const toolNode = new ToolNode(tools);
 
-//Get the llm from the groq
+// Get the llm from groq
 const groq = new ChatGroq({
-    model: 'llama-3.1-8b-instant',
-    temperature: 0,
-    maxRetries: 3,
-    apiKey: process.env.GROQ_API_KEY,
+  model: 'llama-3.1-8b-instant',
+  temperature: 0,
+  maxRetries: 3,
+  apiKey: process.env.GROQ_API_KEY,
 }).bindTools(tools);//Binding the tools to the llm
 
+// Function to decide whether to continue with llm or with tool
+function shouldContinue(state: MessageState) {
+  const lastMessage = state.messages[state.messages.length - 1] as any;
 
-//Function to decide whether to continue with llm or with tool
-function shouldContinue({ messages }: typeof MessagesAnnotation.State){
-    const lastMessage = messages[messages.length - 1] as  any;
-    // console.log('Last message:', lastMessage);
-    if (lastMessage instanceof AIMessage && lastMessage.tool_calls && lastMessage.tool_calls.length > 0) {
-        // console.log("Calling the tools");
-        return 'tools';
-    }
-    // console.log("Calling the llm");
-    return '__end__';
+  // If the last message has tool calls, we need to execute them
+  if (lastMessage.tool_calls && lastMessage.tool_calls.length > 0) {
+    return 'tools';
+  }
+  // otherwise call the llm
+  return '__end__';
 }
 
-
-//Building a agent model and functionality
-async function agentModel(state: MessageState){
-    try{
-        const response = await groq.invoke(state.messages);
-        return { messages: [response] }; // returning updated state with new message
-    }catch(err){
-         return { 
+// Agent model function
+async function agentModel(state: MessageState) {
+  try {
+    const response = await groq.invoke(state.messages);
+    return { messages: [response] };
+  } catch (err) {
+    console.error('Error in agentModel:', err);
+    return { 
       messages: [new AIMessage("Sorry, I encountered an error processing your request.")] 
     };
-    }
+  }
 }
 
-//Build the workflow uisng LangGraph
+// Build the workflow using LangGraph
 const workflow = new StateGraph(MessagesAnnotation)
-    .addNode('agent', agentModel)
-    .addEdge('__start__', 'agent')
-    .addNode('tools', toolNode)//creating the tool node
-    .addEdge('tools','agent')
-    .addConditionalEdges('agent', shouldContinue)
-    .addEdge('agent','__end__');
+  .addNode('agent', agentModel)
+  .addNode('tools', toolNode)//creating the tool node
+  .addEdge('__start__', 'agent')
+  .addConditionalEdges('agent', shouldContinue)//conditional edge to decide whether to go to tools or directly llm reponse
+  .addEdge('tools', 'agent'); // After tools execute, go back to agent
 
- const app = workflow.compile();
+const app = workflow.compile({
+  checkpointer: checkpointer,
+});
 
- // Simple loading message functions
+// Simple loading message functions
 function showLoading(mode: 'start' | 'stop') {
   if (mode === 'start') {
     process.stdout.write('Loading...');
@@ -81,23 +85,62 @@ function showLoading(mode: 'start' | 'stop') {
   }
 }
 
-async function main(params: string[]) {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    while(true){
-        const userInput = await rl.question('You:');
-        if(userInput.toLowerCase() === 'exit'){
-            break;
-        }
-        showLoading('start');
-        const finalMessage = await app.invoke({messages:[new HumanMessage(userInput)]});
-        const response = finalMessage.messages[finalMessage.messages.length - 1];
-        showLoading('stop');
-        console.log('Bot:', response?.content);
+async function main() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  console.log('Chat bot started. Type "exit" to quit.');
+  
+  while (true) {
+    const userInput = await rl.question('You: ');
+    if (userInput.toLowerCase() === 'exit') {
+      break;
     }
-    rl.close();
+
+    if (!userInput.trim()) {
+      continue; // Skip empty inputs
+    }
+
+    showLoading('start');
     
+    try {
+      const finalMessage = await app.invoke(
+        { 
+          messages: [new HumanMessage({content: userInput})] 
+        },
+        { 
+          configurable: { 
+            thread_id: '1' // Use unique thread_id for each conversation, for testing 1 is hardcoded
+          } 
+        }
+      );
+      
+      showLoading('stop');
+      
+      // Handle case where messages might be empty
+      if (finalMessage.messages && finalMessage.messages.length > 0) {
+        const response = finalMessage.messages[finalMessage.messages.length - 1];
+        console.log('Bot:', response?.content || 'No response content');
+      } else {
+        console.log('Bot: No response generated');
+      }
+      
+    } catch (error) {
+      showLoading('stop');
+      console.error('Error:', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+  
+  rl.close();
+  console.log('Goodbye!');
 }
-main([]);
+
+// Handle process termination
+process.on('SIGINT', () => {
+  console.log('\nGoodbye!');
+  process.exit(0);
+});
+
+main().catch(console.error);
