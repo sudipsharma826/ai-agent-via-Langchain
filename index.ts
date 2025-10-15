@@ -1,9 +1,9 @@
-import { AIMessage, BaseMessage, HumanMessage } from '@langchain/core/messages';
+import { AIMessage, HumanMessage } from '@langchain/core/messages';
 import { ChatGroq } from '@langchain/groq';
 import { StateGraph, MemorySaver, MessagesAnnotation } from '@langchain/langgraph';
 import { ToolNode } from "@langchain/langgraph/prebuilt";
 import { TavilySearch } from "@langchain/tavily";
-import { Annotation } from '@langchain/langgraph';
+
 import readline from 'node:readline/promises';
 import 'dotenv/config';
 
